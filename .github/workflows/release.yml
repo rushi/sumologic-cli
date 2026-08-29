@@ -1,0 +1,81 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: darwin-arm64
+          - os: macos-13
+            target: darwin-x86_64
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+          - os: windows-latest
+            target: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --group dev
+
+      - name: Build binary
+        run: >
+          uv run pyinstaller --onefile --name sumologic
+          --collect-all mcp2cli
+          --exclude-module mcp.cli --exclude-module typer
+          --hidden-import truststore
+          --clean --noconfirm src/sumologic_cli/__main__.py
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd dist
+          tar -czf sumologic-${{ matrix.target }}.tar.gz sumologic
+          shasum -a 256 sumologic-${{ matrix.target }}.tar.gz > sumologic-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist
+          7z a sumologic-${{ matrix.target }}.zip sumologic.exe
+          sha256sum sumologic-${{ matrix.target }}.zip > sumologic-${{ matrix.target }}.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sumologic-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
