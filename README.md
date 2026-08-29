@@ -16,6 +16,19 @@ curl -fsSL https://raw.githubusercontent.com/rushi/sumologic-cli/main/install.sh
 Or grab a binary from [Releases](https://github.com/rushi/sumologic-cli/releases) directly.
 Builds are published for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64).
 
+### macOS Gatekeeper
+
+The binaries are unsigned, so macOS quarantines anything downloaded from Releases through a
+browser and refuses to run it ("cannot be opened because the developer cannot be verified").
+Clear the quarantine attribute once, after checking the release checksum:
+
+```bash
+xattr -d com.apple.quarantine ~/.local/bin/sumologic
+```
+
+`install.sh` downloads with `curl`, which does not set the attribute, so this step only
+applies to browser downloads.
+
 ## Usage
 
 ```bash
