@@ -46,7 +46,15 @@ sumologic log-search---run-log-search \
 ```
 
 The first invocation opens a browser for SumoLogic authorization. Tokens are cached in
-`~/.cache/mcp2cli/oauth/` and refreshed automatically.
+`~/.cache/sumologic-cli/oauth/` and refreshed automatically. SumoLogic access tokens last
+five minutes, so the refresh path runs often.
+
+The cache is deliberately separate from a stock `mcp2cli` install's
+`~/.cache/mcp2cli/oauth/`. mcp2cli keys that cache by server URL alone, so two clients
+pointed at the same SumoLogic endpoint under different `client_id` values would overwrite
+each other's refresh token and log `Token refresh failed: 400` on every run. If you see
+that message, something else is authorizing against the same endpoint with a different
+client; clear the cache directory to recover.
 
 ### Log search gotchas
 

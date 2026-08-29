@@ -6,8 +6,16 @@ single downloadable binary instead of installing mcp2cli and baking a config.
 
 import os
 import sys
+from pathlib import Path
 
-from mcp2cli import BakeConfig, _main_impl
+# mcp2cli keys its OAuth token cache by server URL alone, so a stock mcp2cli
+# install pointed at the same SumoLogic endpoint would share this binary's
+# tokens under a different client_id and get 400 invalid_grant on every refresh.
+# Claim a private cache before importing mcp2cli, which reads these at import time.
+os.environ.setdefault("MCP2CLI_CACHE_DIR", str(Path.home() / ".cache" / "sumologic-cli"))
+os.environ.setdefault("MCP2CLI_CONFIG_DIR", str(Path.home() / ".config" / "sumologic-cli"))
+
+from mcp2cli import BakeConfig, _main_impl  # noqa: E402
 
 # CIMD client metadata document. SumoLogic's authorization server fetches this URL
 # server-side during /oauth2/authorize, so it must stay publicly reachable.
