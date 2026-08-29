@@ -100,5 +100,9 @@ uv run pyinstaller --onefile --name sumologic \
   --clean --noconfirm src/sumologic_cli/__main__.py
 ```
 
-Output lands in `dist/sumologic` (roughly 22 MB). Pushing a `v*` tag runs the same build
-across the release matrix and publishes the artifacts.
+Output lands in `dist/sumologic` (roughly 22 MB), for the current platform only.
+PyInstaller does not cross-compile, which is what the CI matrix is for.
+
+## Releasing
+
+Push a `v*` tag. See [RELEASING.md](RELEASING.md) for the full procedure.
