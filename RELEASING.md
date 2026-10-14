@@ -68,7 +68,7 @@ gh workflow run release
 
 - **A missing runner.** `ubuntu-24.04-arm` and `macos-13` queue longer than the rest. The
   release job needs every build job to finish, so one stuck runner holds the whole release.
-- **A new mcp2cli version.** `pyproject.toml` pins `mcp2cli==3.6.0`. Bumping it can pull in
+- **A new mcp2cli version.** `pyproject.toml` pins an exact `mcp2cli` version. Bumping it can pull in
   imports PyInstaller does not trace. Build locally first (see README) and run
   `./dist/sumologic --list` before tagging.
 - **Deleting `docs/client.json` or turning off GitHub Pages.** SumoLogic fetches that URL
