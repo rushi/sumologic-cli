@@ -50,8 +50,17 @@ sumologic log-search:run-log-search \
 Subcommands are named `<target>:<tool>`, after the gateway's `<target>___<tool>` wire names.
 
 The first invocation opens a browser for SumoLogic authorization. Tokens are cached in
-`~/.cache/sumologic-cli/oauth/` and refreshed automatically. SumoLogic access tokens last
-five minutes, so the refresh path runs often.
+`~/.cache/sumologic-cli/oauth/`. SumoLogic access tokens last five minutes, so every run
+first checks the cached token and, when it has expired, exchanges the refresh token for a
+new one without opening a browser.
+
+```bash
+sumologic auth:login     # log in through the browser, replacing any cached tokens
+sumologic auth:refresh   # exchange the cached refresh token for a new access token now
+```
+
+`auth:refresh` exits 1 when there is no cached refresh token or SumoLogic rejects it. Run
+`auth:login` to recover.
 
 The cache is deliberately separate from a stock `mcp2cli` install's
 `~/.cache/mcp2cli/oauth/`. mcp2cli keys that cache by server URL alone, so two clients

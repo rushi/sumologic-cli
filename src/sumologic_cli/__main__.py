@@ -13,6 +13,8 @@ import os
 import re
 import sys
 import textwrap
+import time
+from datetime import datetime
 from pathlib import Path
 
 # mcp2cli keys its OAuth token cache by server URL alone, so a stock mcp2cli
@@ -22,8 +24,16 @@ from pathlib import Path
 os.environ.setdefault("MCP2CLI_CACHE_DIR", str(Path.home() / ".cache" / "sumologic-cli"))
 os.environ.setdefault("MCP2CLI_CONFIG_DIR", str(Path.home() / ".config" / "sumologic-cli"))
 
+import anyio  # noqa: E402
+import httpx2  # noqa: E402
 import mcp2cli  # noqa: E402
 from mcp2cli import BakeConfig, _main_impl  # noqa: E402
+from mcp.client.auth.exceptions import OAuthFlowError  # noqa: E402
+from mcp.client.auth.utils import (  # noqa: E402
+    build_oauth_authorization_server_metadata_discovery_urls,
+    build_protected_resource_metadata_discovery_urls,
+)
+from mcp.shared.auth import OAuthToken  # noqa: E402
 from mcp.types import Tool  # noqa: E402
 
 # SumoLogic's gateway prefixes every tool with its target name and three
@@ -205,6 +215,12 @@ def format_top_help(commands) -> str:
         DESCRIPTION,
         "",
         "commands:",
+        "  Authentication",
+        *(
+            f"    {name.ljust(name_width)}{summary}"
+            for name, (_, summary) in AUTH_COMMANDS.items()
+        ),
+        "",
     ]
     for title, cmds in groups.items():
         if not cmds:
@@ -278,7 +294,7 @@ def build_argparse(commands, pre_parser, **kwargs) -> argparse.ArgumentParser:
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
     subparsers.metavar = "<command>"
-    names = sorted(subparsers.choices)
+    names = sorted([*subparsers.choices, *AUTH_COMMANDS])
 
     parser.format_help = lambda: format_top_help(commands)
     parser.error = lambda message: _report_unknown_command(parser, names, message)
@@ -336,13 +352,184 @@ def resolve_mcp_url() -> str:
     return url
 
 
+# Refresh this long before the access token's recorded expiry, so a token that
+# is valid when checked does not lapse mid-request.
+EXPIRY_MARGIN_SECONDS = 30
+
+
+class AuthError(Exception):
+    pass
+
+
+def _token_storage(mcp_url: str) -> "mcp2cli.FileTokenStorage":
+    return mcp2cli.FileTokenStorage(mcp_url)
+
+
+def _read_tokens(storage) -> "OAuthToken | None":
+    return anyio.run(storage.get_tokens)
+
+
+def _format_expiry(storage) -> str:
+    expires_at = storage.get_expires_at()
+    if expires_at is None:
+        return "unknown expiry"
+    stamp = datetime.fromtimestamp(expires_at).astimezone().strftime("%H:%M:%S %Z")
+    return f"expires {stamp}"
+
+
+async def _get_json(client: httpx2.AsyncClient, urls: list[str]) -> dict:
+    for url in urls:
+        response = await client.get(url)
+        if response.status_code == 200:
+            return response.json()
+    raise AuthError(f"OAuth metadata discovery failed, tried: {', '.join(urls)}")
+
+
+async def _discover_token_endpoint(client: httpx2.AsyncClient, mcp_url: str) -> str:
+    """Find the token endpoint through RFC 9728 and RFC 8414 discovery.
+
+    The MCP SDK falls back to `<mcp host>/token` in a process that has not run
+    discovery yet, and SumoLogic's gateway rejects that with a 400, so a cached
+    refresh token never gets used. Discover the endpoint the way a full login does.
+    """
+    resource = await _get_json(
+        client, build_protected_resource_metadata_discovery_urls(None, mcp_url)
+    )
+    auth_server_url = resource["authorization_servers"][0]
+    metadata = await _get_json(
+        client, build_oauth_authorization_server_metadata_discovery_urls(auth_server_url, mcp_url)
+    )
+    return metadata["token_endpoint"]
+
+
+async def _refresh(mcp_url: str) -> None:
+    storage = _token_storage(mcp_url)
+    tokens = await storage.get_tokens()
+    client_info = await storage.get_client_info()
+    if tokens is None or not tokens.refresh_token or client_info is None:
+        raise AuthError(f"No cached refresh token. Run '{PROG} auth:login'.")
+
+    async with httpx2.AsyncClient(timeout=30) as client:
+        token_endpoint = await _discover_token_endpoint(client, mcp_url)
+        response = await client.post(
+            token_endpoint,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": tokens.refresh_token,
+                "client_id": client_info.client_id,
+            },
+        )
+
+    if response.status_code != 200:
+        try:
+            error = response.json().get("error", response.text)
+        except ValueError:
+            error = response.text
+        raise AuthError(
+            f"Token refresh failed: {response.status_code} {error}. Run '{PROG} auth:login'."
+        )
+
+    refreshed = OAuthToken.model_validate_json(response.content)
+    # RFC 6749 section 6 lets the server omit refresh_token when the old one stays valid.
+    if not refreshed.refresh_token:
+        refreshed = refreshed.model_copy(update={"refresh_token": tokens.refresh_token})
+    await storage.set_tokens(refreshed)
+
+
+def refresh_if_expired(mcp_url: str) -> None:
+    """Refresh an expired access token before mcp2cli sees it.
+
+    Without this, every run more than five minutes after the last one hits the
+    SDK's broken refresh path and opens a browser for a full login. A failure
+    here is silent, since mcp2cli's own login flow still runs as the fallback.
+    """
+    storage = _token_storage(mcp_url)
+    expires_at = storage.get_expires_at()
+    if expires_at is None or expires_at - EXPIRY_MARGIN_SECONDS > time.time():
+        return
+    try:
+        anyio.run(_refresh, mcp_url)
+    except (AuthError, httpx2.HTTPError):
+        pass
+
+
+def auth_refresh(mcp_url: str) -> None:
+    try:
+        anyio.run(_refresh, mcp_url)
+    except (AuthError, httpx2.HTTPError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Access token refreshed, {_format_expiry(_token_storage(mcp_url))}.", file=sys.stderr)
+
+
+async def _login(mcp_url: str) -> None:
+    provider = mcp2cli.build_oauth_provider(
+        mcp_url,
+        client_id=CLIENT_ID,
+        redirect_uri=REDIRECT_URI,
+        flow="authorization_code",
+    )
+    # Any authenticated MCP request works. The gateway answers it with a 401,
+    # which drives the provider through discovery and the browser flow.
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": PROG, "version": "login"},
+        },
+    }
+    async with httpx2.AsyncClient(auth=provider, timeout=330) as client:
+        response = await client.post(
+            mcp_url,
+            json=initialize,
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+    if response.status_code != 200:
+        raise AuthError(f"Login failed: the gateway answered {response.status_code}.")
+
+
+def auth_login(mcp_url: str) -> None:
+    storage = _token_storage(mcp_url)
+    storage.clear_tokens()
+    try:
+        anyio.run(_login, mcp_url)
+    except (AuthError, httpx2.HTTPError, OAuthFlowError, RuntimeError, TimeoutError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if _read_tokens(storage) is None:
+        print("Error: login finished without storing a token.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Logged in to {mcp_url}, access token {_format_expiry(storage)}.", file=sys.stderr)
+
+
+AUTH_COMMANDS = {
+    "auth:login": (auth_login, "Log in through the browser, replacing any cached tokens"),
+    "auth:refresh": (auth_refresh, "Exchange the cached refresh token for a new access token"),
+}
+
+
 def main() -> None:
     args = sys.argv[1:] or ["--help"]
     if args[0] == "--version":
         print_version()
         return
 
+    if args[0] in AUTH_COMMANDS:
+        handler, summary = AUTH_COMMANDS[args[0]]
+        if len(args) > 1:
+            if args[1] in ("-h", "--help"):
+                print(f"usage: {PROG} {args[0]}\n\n{summary}.")
+                return
+            print(f"{PROG}: {args[0]} takes no arguments.", file=sys.stderr)
+            sys.exit(2)
+        handler(resolve_mcp_url())
+        return
+
     mcp_url = resolve_mcp_url()
+    refresh_if_expired(mcp_url)
     cache_key = mcp2cli.cache_key_for({"source": mcp_url, "catalog": CATALOG_VERSION})
     argv = [
         "--mcp",
