@@ -4,9 +4,9 @@ SumoLogic's MCP server as a single downloadable binary. Log search, dashboards, 
 Cloud SIEM, and mobot investigations from the command line, with no Python, no `uv`, and
 no MCP client.
 
-Built on [mcp2cli](https://github.com/knowsuchagency/mcp2cli): tool schemas are fetched
-and cached at runtime, so an agent pays for one subcommand's schema instead of all two dozen
-on every turn.
+Built on [mcp2cli](https://github.com/knowsuchagency/mcp2cli), which fetches and caches tool
+schemas at runtime, so an agent pays for one subcommand's schema instead of all two dozen on
+every turn.
 
 ## Install
 
@@ -15,7 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/rushi/sumologic-cli/main/install.sh
 ```
 
 Or grab a binary from [Releases](https://github.com/rushi/sumologic-cli/releases) directly.
-Builds are published for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64).
+CI publishes builds for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64).
 
 ### macOS Gatekeeper
 
@@ -47,6 +47,8 @@ sumologic log-search:run-log-search \
   --limit 5
 ```
 
+Subcommands are named `<target>:<tool>`, after the gateway's `<target>___<tool>` wire names.
+
 The first invocation opens a browser for SumoLogic authorization. Tokens are cached in
 `~/.cache/sumologic-cli/oauth/` and refreshed automatically. SumoLogic access tokens last
 five minutes, so the refresh path runs often.
@@ -57,8 +59,6 @@ pointed at the same SumoLogic endpoint under different `client_id` values would 
 each other's refresh token and log `Token refresh failed: 400` on every run. If you see
 that message, something else is authorizing against the same endpoint with a different
 client; clear the cache directory to recover.
-
-Subcommands are named `<target>:<tool>`, after the gateway's `<target>___<tool>` wire names.
 
 ### Tools hidden from the gateway's tool list
 
