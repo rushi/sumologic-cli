@@ -3,7 +3,11 @@ name = "sumologic-cli"
 version = "0.2.0"
 description = "SumoLogic MCP server as a standalone CLI"
 requires-python = ">=3.11"
-dependencies = ["mcp2cli==3.8.0"]
+dependencies = [
+    "mcp2cli==3.8.0",
+    # Windows ships no IANA zone database, which --timezone needs.
+    "tzdata; sys_platform == 'win32'",
+]
 
 [project.scripts]
 sumologic = "sumologic_cli.__main__:main"
@@ -16,4 +20,7 @@ build-backend = "hatchling.build"
 packages = ["src/sumologic_cli"]
 
 [dependency-groups]
-dev = ["pyinstaller>=6.11"]
+dev = ["pyinstaller>=6.11", "pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

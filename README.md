@@ -41,9 +41,7 @@ sumologic discovery:list-partitions
 
 sumologic log-search:run-log-search \
   --query '_sourceCategory=prod/api* | count by _sourceHost' \
-  --from "$(date -u -v-5M +%Y-%m-%dT%H:%M:%S)" \
-  --to "$(date -u +%Y-%m-%dT%H:%M:%S)" \
-  --timezone UTC \
+  --from -5m --to now \
   --limit 5
 ```
 
@@ -59,8 +57,9 @@ sumologic auth:login     # log in through the browser, replacing any cached toke
 sumologic auth:refresh   # exchange the cached refresh token for a new access token now
 ```
 
-`auth:refresh` exits 1 when there is no cached refresh token or SumoLogic rejects it. Run
-`auth:login` to recover.
+`auth:refresh` exits 3 when there is no cached refresh token or SumoLogic rejects it. Run
+`auth:login` to recover. Concurrent commands take a file lock before refreshing, so only one
+of them spends the refresh token.
 
 The cache is deliberately separate from a stock `mcp2cli` install's
 `~/.cache/mcp2cli/oauth/`. mcp2cli keys that cache by server URL alone, so two clients
@@ -80,11 +79,38 @@ SIEM enabled.
 
 The mobot tools take an `authorization` argument that the gateway fills in. The CLI hides it.
 
-### Log search gotchas
+### Log search time ranges
 
-- `--from` / `--to` reject relative offsets like `-5m`. Pass absolute ISO 8601 timestamps.
-- Ranges over 30 minutes are rejected unless the query filters on `_sourceCategory`,
-  `_collector`, `_index`, or `_view`.
+The gateway accepts only absolute timestamps, so the CLI resolves `--from` and `--to` before
+sending them. Both take ISO 8601 (`2026-06-08T00:00:00Z`), `now`, or an offset such as `-15m`,
+`-2h`, `now-1d`, or `'3h ago'`. Offsets and timestamps carrying a UTC offset are converted to
+`--timezone`, which defaults to `UTC`.
+
+Ranges over 30 minutes need a `_sourceCategory`, `_collector`, `_index`, or `_view` filter in
+the query. The CLI checks this locally and exits 4 instead of making the round trip.
+
+## Running under an agent
+
+Agent harnesses such as Claude Code run commands without a terminal. In that case the CLI
+never opens a browser: when it has no usable token it exits 3 with a message telling the
+agent to ask you to run `sumologic auth:login`. It treats a session as non-interactive when
+stderr is not a terminal. `SUMOLOGIC_NONINTERACTIVE=1` or `0` overrides the detection.
+`auth:login` always opens the browser.
+
+`SUMOLOGIC_READONLY=1` keeps only commands that read data: `get-*`, `list-*`, `*-read-*`,
+`*-search`, `log-search:run-log-search`, `mobot-invoke`, and `mobot-poll`. Everything else,
+including any tool the gateway adds later, is hidden, so an agent can neither list nor call it.
+
+The tool catalog is cached for 24 hours. Pass `--refresh` to re-fetch it.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | The tool reported an error |
+| 2 | Bad command line: unknown command or option |
+| 3 | Authorization required or rejected. Run `sumologic auth:login` |
+| 4 | Arguments rejected locally before calling the gateway |
+| 5 | Network failure, timeout, or a 5xx or 429 from the gateway. Retry |
 
 ## Configuration
 
@@ -94,6 +120,8 @@ The mobot tools take an `authorization` argument that the gateway fills in. The 
 | `SUMOLOGIC_MCP_URL` | derived | Full MCP endpoint URL, overriding `SUMOLOGIC_DEPLOYMENT` |
 | `SUMOLOGIC_OAUTH_CLIENT_ID` | the hosted CIMD URL | Alternative OAuth client, for orgs with CIMD disabled |
 | `SUMOLOGIC_OAUTH_REDIRECT_URI` | `http://localhost:8888/callback` | OAuth callback |
+| `SUMOLOGIC_READONLY` | unset | `1` keeps only commands that read data |
+| `SUMOLOGIC_NONINTERACTIVE` | auto | `1` never opens a browser for login, `0` always may |
 
 ## How authorization works
 
@@ -123,7 +151,8 @@ uv run pyinstaller --onefile --name sumologic \
   --clean --noconfirm src/sumologic_cli/__main__.py
 ```
 
-Output lands in `dist/sumologic` (roughly 22 MB), for the current platform only.
+Output lands in `dist/sumologic` (roughly 22 MB), for the current platform only. Run the
+tests with `uv run pytest`.
 PyInstaller does not cross-compile, which is what the CI matrix is for.
 
 ## Releasing
