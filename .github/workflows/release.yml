@@ -14,11 +14,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: darwin-arm64
-          - os: macos-13
+          - os: macos-15-intel
             target: darwin-x86_64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: linux-x86_64
           - os: ubuntu-24.04-arm
             target: linux-arm64
@@ -26,9 +26,9 @@ jobs:
             target: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
 
@@ -57,7 +57,7 @@ jobs:
           7z a sumologic-${{ matrix.target }}.zip sumologic.exe
           sha256sum sumologic-${{ matrix.target }}.zip > sumologic-${{ matrix.target }}.zip.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sumologic-${{ matrix.target }}
           path: |
@@ -68,14 +68,14 @@ jobs:
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true
