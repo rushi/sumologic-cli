@@ -246,8 +246,8 @@ name = "httpcore2"
 version = "2.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/be/ad/f4f0e57345f1870f3e8cb624e058d7eca6e5a27d33bcc3311d9b618734cd/httpcore2-2.12.0.tar.gz", hash = "sha256:9293522bba0aa7c4c8e9e3f040c16575bd8868e155a77fa30c7a9085a5eae648", size = 67548, upload-time = "2026-08-18T13:22:08.211Z" }
 wheels = [
@@ -383,16 +383,16 @@ wheels = [
 
 [[package]]
 name = "mcp2cli"
-version = "3.6.0"
+version = "3.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6c/d2/5878e65afe78efe1ffbec117fb4729dd0e29ddcb7217d9724f93b64f4487/mcp2cli-3.6.0.tar.gz", hash = "sha256:c62cee41beeb82d0ea4a85559bced431f13624434de8b7e6a9277dcbddc4f206", size = 45708, upload-time = "2026-08-19T07:42:42.131Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/5a/78799e514fe43c5657c3756967e61935e96b753a2854ef23c8b96d9451b3/mcp2cli-3.8.0.tar.gz", hash = "sha256:232f541eb39de4abdd99e6066d715a42bc392cd78ed0641dccfdca7b50113dee", size = 55967, upload-time = "2026-10-12T06:17:33.771Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/70/31/129d0629b7cb4e9deaf932576adbcbaaaaf847b6a9ad66183b30f209f0ad/mcp2cli-3.6.0-py3-none-any.whl", hash = "sha256:ee232ea402c5b424d810dda9d5a6dc6ce3d3396930a5044136f66fa5fc4755ef", size = 46612, upload-time = "2026-08-19T07:42:41.129Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/e9/6416f78c4621e8b82bb29d1c1c7e1f02780bbada42c924442772c3657f5f/mcp2cli-3.8.0-py3-none-any.whl", hash = "sha256:de087ca239d06b3104a1b7199a1c1326b5073602ef85b27456335a9099634988", size = 56258, upload-time = "2026-10-12T06:17:32.71Z" },
 ]
 
 [[package]]
@@ -874,7 +874,7 @@ wheels = [
 
 [[package]]
 name = "sumologic-cli"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "mcp2cli" },
@@ -886,7 +886,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mcp2cli", specifier = "==3.6.0" }]
+requires-dist = [{ name = "mcp2cli", specifier = "==3.8.0" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pyinstaller", specifier = ">=6.11" }]
