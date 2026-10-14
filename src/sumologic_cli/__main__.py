@@ -4,8 +4,15 @@ Reuses mcp2cli's runtime but hardcodes the SumoLogic connection, so users get a
 single downloadable binary instead of installing mcp2cli and baking a config.
 """
 
+import argparse
+import difflib
+import importlib.metadata
+import json
+import logging
 import os
+import re
 import sys
+import textwrap
 from pathlib import Path
 
 # mcp2cli keys its OAuth token cache by server URL alone, so a stock mcp2cli
@@ -15,7 +22,280 @@ from pathlib import Path
 os.environ.setdefault("MCP2CLI_CACHE_DIR", str(Path.home() / ".cache" / "sumologic-cli"))
 os.environ.setdefault("MCP2CLI_CONFIG_DIR", str(Path.home() / ".config" / "sumologic-cli"))
 
+import mcp2cli  # noqa: E402
 from mcp2cli import BakeConfig, _main_impl  # noqa: E402
+from mcp.types import Tool  # noqa: E402
+
+# SumoLogic's gateway prefixes every tool with its target name and three
+# underscores (`log-search___runLogSearch`). Render that separator as a colon so
+# subcommands read `log-search:run-log-search` instead of `log-search---run-log-search`.
+TARGET_SEPARATOR = "___"
+_to_kebab = mcp2cli.to_kebab
+
+
+def to_kebab(name: str) -> str:
+    return ":".join(_to_kebab(part) for part in name.split(TARGET_SEPARATOR))
+
+
+mcp2cli.to_kebab = to_kebab
+
+# The gateway's tools/list returns only part of the catalog. The Cloud SIEM
+# (insights, rules) and mobot tools are reachable through tools/call but only
+# discoverable via this search tool, which returns at most 10 matches per query.
+SEARCH_TOOL = "x_amz_bedrock_agentcore_search"
+SEARCH_QUERIES = (
+    "cloud siem insights",
+    "cloud siem rules",
+    "mobot investigation invoke poll cancel feedback",
+)
+# The gateway injects this argument itself. Exposing it would make mobot
+# subcommands demand a bearer token on the command line.
+GATEWAY_INJECTED_ARGS = ("authorization",)
+
+_list_all_tools = mcp2cli._list_all_tools
+
+
+def _tool_from_search(raw: dict):
+    schema = dict(raw.get("inputSchema") or {})
+    properties = {
+        key: value
+        for key, value in (schema.get("properties") or {}).items()
+        if key not in GATEWAY_INJECTED_ARGS
+    }
+    schema["properties"] = properties
+    if "required" in schema:
+        schema["required"] = [key for key in schema["required"] if key in properties]
+    return Tool(
+        name=raw["name"],
+        description=raw.get("description") or "",
+        inputSchema=schema,
+    )
+
+
+async def list_all_tools(session):
+    tools = await _list_all_tools(session)
+    names = {tool.name for tool in tools}
+    if SEARCH_TOOL not in names:
+        return tools
+
+    for query in SEARCH_QUERIES:
+        result = await session.call_tool(SEARCH_TOOL, {"query": query})
+        if mcp2cli._mcp_attr(result, "isError"):
+            continue
+        payload = mcp2cli._mcp_attr(result, "structuredContent")
+        if payload is None:
+            payload = json.loads(mcp2cli._extract_content_parts(result.content) or "{}")
+        for raw in payload.get("tools", []):
+            if raw.get("name") in names:
+                continue
+            names.add(raw["name"])
+            tools.append(_tool_from_search(raw))
+    return tools
+
+
+mcp2cli._list_all_tools = list_all_tools
+
+
+class _HiddenToolWarningFilter(logging.Filter):
+    """Drop the MCP SDK's warning that a called tool is missing from tools/list.
+
+    Every call to a search-discovered tool trips it, and the tool still runs.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "not listed by server" not in record.getMessage()
+
+
+logging.getLogger("client").addFilter(_HiddenToolWarningFilter())
+
+# Folded into the tool cache key. Bump whenever list_all_tools changes which
+# tools it returns, so installed binaries drop catalogs cached by older builds.
+CATALOG_VERSION = 3
+
+PROG = "sumologic"
+DESCRIPTION = "SumoLogic log search, dashboards, alerts, Cloud SIEM, and mobot from the command line."
+REPO_URL = "https://github.com/rushi/sumologic-cli"
+HELP_WIDTH = 100
+
+# Commands are grouped by the gateway target before the colon, in this order.
+# Targets missing here land under "Other".
+COMMAND_GROUPS = {
+    "log-search": "Log search",
+    "discovery": "Discovery (find _sourceCategory values, fields, partitions)",
+    "dashboards": "Dashboards",
+    "alerts": "Alerts library",
+    "insights": "Cloud SIEM insights",
+    "rules": "Cloud SIEM rules",
+    "mobot-server": "Mobot investigations",
+}
+
+# One-line summaries for the top-level listing where the server's first sentence
+# is a caveat or a typo rather than a description.
+COMMAND_SUMMARIES = {
+    "x-amz-bedrock-agentcore-search": "Search the gateway's full tool catalog by keyword",
+    "log-search:run-log-search": "Run a log search query over a time range and return results",
+    "alerts:alerts-read-by-id": "Get an alert or folder from the alerts library",
+    "alerts:alerts-search": "Search the alerts library for an alert or folder",
+    "insights:get-insights": "List Insights matching a query (capped at 10,000 results)",
+}
+
+COMMAND_EXAMPLES = {
+    "log-search:run-log-search": """\
+examples:
+  sumologic log-search:run-log-search \\
+    --query '_sourceCategory=prod/api | count by _sourceHost' \\
+    --from 2026-06-08T00:00:00Z --to 2026-06-08T00:15:00Z \\
+    --timezone UTC --limit 20
+
+notes:
+  --from and --to take absolute ISO 8601 times. Relative offsets like -5m are rejected.
+  Ranges over 30 minutes need a _sourceCategory, _collector, _index, or _view filter.
+  Run discovery:list-partitions first to find _sourceCategory values.""",
+    "mobot-server:mobot-invoke": """\
+examples:
+  sumologic mobot-server:mobot-invoke --question 'Why did 5xx errors spike in the last hour?'
+
+  The response carries a conversation_id and message_id. Poll for the answer with:
+  sumologic mobot-server:mobot-poll --conversation-id <id> --message-id <id> --wait-seconds 60""",
+}
+
+GLOBAL_OPTIONS = (
+    ("--list", "List commands with one-line descriptions"),
+    ("--search PATTERN", "List commands whose name or description contains PATTERN"),
+    ("--json", "Emit the full MCP result envelope as JSON, including isError"),
+    ("--pretty", "Pretty-print JSON output"),
+    ("--raw", "Print the raw response body"),
+    ("--head N", "Limit output to the first N records (arrays) or N lines (text)"),
+    ("--refresh", "Re-fetch the tool catalog instead of using the 1-hour cache"),
+    ("--version", "Print the sumologic and mcp2cli versions"),
+    ("-h, --help", "Show this help, or a command's options with <command> --help"),
+)
+
+ENVIRONMENT = (
+    ("SUMOLOGIC_DEPLOYMENT", "Deployment: us1, us2 (default), eu, au, ca, de, in, jp, fed"),
+    ("SUMOLOGIC_MCP_URL", "Full MCP endpoint URL, overriding SUMOLOGIC_DEPLOYMENT"),
+    ("SUMOLOGIC_OAUTH_CLIENT_ID", "OAuth client for orgs with CIMD clients disabled"),
+    ("SUMOLOGIC_OAUTH_REDIRECT_URI", "OAuth callback (default http://localhost:8888/callback)"),
+)
+
+
+def _summary(cmd) -> str:
+    if cmd.name in COMMAND_SUMMARIES:
+        return COMMAND_SUMMARIES[cmd.name]
+    first_sentence = cmd.description.split(". ")[0].strip().rstrip(".")
+    return textwrap.shorten(first_sentence, width=70, placeholder="...")
+
+
+def _rows(pairs, indent: int) -> list[str]:
+    width = max(len(left) for left, _ in pairs) + 3
+    return [f"{' ' * indent}{left.ljust(width)}{right}" for left, right in pairs]
+
+
+def format_top_help(commands) -> str:
+    groups: dict[str, list] = {title: [] for title in COMMAND_GROUPS.values()}
+    groups["Other"] = []
+    for cmd in commands:
+        target = cmd.name.split(":")[0] if ":" in cmd.name else None
+        groups[COMMAND_GROUPS.get(target, "Other")].append(cmd)
+
+    name_width = max(len(cmd.name) for cmd in commands) + 3
+    lines = [
+        f"usage: {PROG} [options] <command> [command options]",
+        "",
+        DESCRIPTION,
+        "",
+        "commands:",
+    ]
+    for title, cmds in groups.items():
+        if not cmds:
+            continue
+        lines.append(f"  {title}")
+        lines.extend(
+            f"    {cmd.name.ljust(name_width)}{_summary(cmd)}"
+            for cmd in sorted(cmds, key=lambda cmd: cmd.name)
+        )
+        lines.append("")
+
+    lines.append("options (place before <command>):")
+    lines.extend(_rows(GLOBAL_OPTIONS, indent=2))
+    lines.append("")
+    lines.append("environment:")
+    lines.extend(_rows(ENVIRONMENT, indent=2))
+    lines.append("")
+    lines.append(f"Run '{PROG} <command> --help' for a command's options. Docs: {REPO_URL}")
+    return "\n".join(lines) + "\n"
+
+
+def _report_unknown_command(parser: argparse.ArgumentParser, names: list[str], message: str) -> None:
+    match = re.search(r"invalid choice: '([^']*)'", message)
+    if match is None:
+        parser.print_usage(sys.stderr)
+        parser.exit(2, f"{PROG}: error: {message}\n")
+
+    typed = match.group(1)
+    # Pre-0.2 names used "---" where commands now use ":".
+    candidates = difflib.get_close_matches(typed.replace("---", ":"), names, n=3, cutoff=0.5)
+    hint = f" Did you mean: {', '.join(candidates)}?" if candidates else ""
+    parser.exit(2, f"{PROG}: unknown command '{typed}'.{hint}\nRun '{PROG} --help' to see all commands.\n")
+
+
+def _customize_command_parser(sub: argparse.ArgumentParser, cmd) -> None:
+    required_names = {p.original_name for p in cmd.params if p.required}
+    required_dests = {mcp2cli._param_dest(p) for p in cmd.params if p.original_name in required_names}
+
+    # mcp2cli never marks tool inputs argparse-required, since --stdin can supply
+    # them instead. Move them into their own section so they stand out.
+    if required_dests:
+        required_group = sub.add_argument_group("required options")
+        sub._action_groups.remove(required_group)
+        sub._action_groups.insert(sub._action_groups.index(sub._optionals), required_group)
+        for action in list(sub._optionals._group_actions):
+            if action.dest in required_dests:
+                sub._optionals._group_actions.remove(action)
+                required_group._group_actions.append(action)
+        required_flags = " ".join(
+            f"{action.option_strings[0]} {action.metavar or action.dest.upper()}"
+            for action in required_group._group_actions
+        )
+        sub.usage = f"{PROG} [options] {cmd.name} {required_flags} [command options]"
+
+    sub.formatter_class = argparse.RawDescriptionHelpFormatter
+    sub.description = textwrap.fill(cmd.description, width=HELP_WIDTH - 20)
+    epilog = [COMMAND_EXAMPLES[cmd.name]] if cmd.name in COMMAND_EXAMPLES else []
+    epilog.append(
+        f"Output options such as --json, --pretty, and --head go before the command:\n"
+        f"  {PROG} --pretty {cmd.name} ..."
+    )
+    sub.epilog = "\n\n".join(epilog)
+
+
+_build_argparse = mcp2cli.build_argparse
+
+
+def build_argparse(commands, pre_parser, **kwargs) -> argparse.ArgumentParser:
+    parser = _build_argparse(commands, pre_parser, **kwargs)
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    subparsers.metavar = "<command>"
+    names = sorted(subparsers.choices)
+
+    parser.format_help = lambda: format_top_help(commands)
+    parser.error = lambda message: _report_unknown_command(parser, names, message)
+    for sub in subparsers.choices.values():
+        _customize_command_parser(sub, sub.get_default("_cmd"))
+    return parser
+
+
+mcp2cli.build_argparse = build_argparse
+
+
+def print_version() -> None:
+    try:
+        version = importlib.metadata.version("sumologic-cli")
+    except importlib.metadata.PackageNotFoundError:
+        version = "dev"
+    print(f"{PROG} {version} (mcp2cli {mcp2cli.__version__})")
 
 # CIMD client metadata document. SumoLogic's authorization server fetches this URL
 # server-side during /oauth2/authorize, so it must stay publicly reachable.
@@ -57,9 +337,18 @@ def resolve_mcp_url() -> str:
 
 
 def main() -> None:
+    args = sys.argv[1:] or ["--help"]
+    if args[0] == "--version":
+        print_version()
+        return
+
+    mcp_url = resolve_mcp_url()
+    cache_key = mcp2cli.cache_key_for({"source": mcp_url, "catalog": CATALOG_VERSION})
     argv = [
         "--mcp",
-        resolve_mcp_url(),
+        mcp_url,
+        "--cache-key",
+        cache_key,
         "--oauth",
         "--oauth-client-id",
         CLIENT_ID,
@@ -67,11 +356,11 @@ def main() -> None:
         REDIRECT_URI,
         "--oauth-flow",
         "authorization_code",
-        *sys.argv[1:],
+        *args,
     ]
     _main_impl(
         argv,
-        bake_config=BakeConfig(prog="sumologic", description="SumoLogic log search, dashboards, alerts, and Cloud SIEM from the command line"),
+        bake_config=BakeConfig(prog=PROG, description=DESCRIPTION),
     )
 
 

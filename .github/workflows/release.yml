@@ -39,7 +39,7 @@ jobs:
           uv run pyinstaller --onefile --name sumologic
           --collect-all mcp2cli
           --exclude-module mcp.cli --exclude-module typer
-          --hidden-import truststore
+          --hidden-import truststore --copy-metadata sumologic-cli
           --clean --noconfirm src/sumologic_cli/__main__.py
 
       - name: Package (unix)

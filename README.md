@@ -1,10 +1,11 @@
 # sumologic-cli
 
 SumoLogic's MCP server as a single downloadable binary. Log search, dashboards, alerts,
-and Cloud SIEM from the command line, with no Python, no `uv`, and no MCP client.
+Cloud SIEM, and mobot investigations from the command line, with no Python, no `uv`, and
+no MCP client.
 
 Built on [mcp2cli](https://github.com/knowsuchagency/mcp2cli): tool schemas are fetched
-and cached at runtime, so an agent pays for one subcommand's schema instead of all twenty
+and cached at runtime, so an agent pays for one subcommand's schema instead of all two dozen
 on every turn.
 
 ## Install
@@ -32,12 +33,13 @@ applies to browser downloads.
 ## Usage
 
 ```bash
-sumologic --list                 # tool names plus one-line descriptions
-sumologic <subcommand> --help    # full schema for that one tool
+sumologic --help                 # commands grouped by area, global options, env vars
+sumologic --search insight       # commands whose name or description matches
+sumologic <subcommand> --help    # one tool's options, required ones first, with examples
 
-sumologic discovery---list-partitions
+sumologic discovery:list-partitions
 
-sumologic log-search---run-log-search \
+sumologic log-search:run-log-search \
   --query '_sourceCategory=prod/api* | count by _sourceHost' \
   --from "$(date -u -v-5M +%Y-%m-%dT%H:%M:%S)" \
   --to "$(date -u +%Y-%m-%dT%H:%M:%S)" \
@@ -56,9 +58,21 @@ each other's refresh token and log `Token refresh failed: 400` on every run. If 
 that message, something else is authorizing against the same endpoint with a different
 client; clear the cache directory to recover.
 
+Subcommands are named `<target>:<tool>`, after the gateway's `<target>___<tool>` wire names.
+
+### Tools hidden from the gateway's tool list
+
+SumoLogic's gateway returns only part of its catalog from `tools/list`. The Cloud SIEM
+(`insights:*`, `rules:*`) and mobot (`mobot-server:*`) tools are callable but only
+discoverable through `x-amz-bedrock-agentcore-search`. The CLI runs a fixed set of searches
+when it builds the tool cache and merges the results in, so these tools appear in `--list`
+like any other. Cloud SIEM tools return `An internal error occurred` on orgs without Cloud
+SIEM enabled.
+
+The mobot tools take an `authorization` argument that the gateway fills in. The CLI hides it.
+
 ### Log search gotchas
 
-- `--timezone` is required even though the schema marks it optional.
 - `--from` / `--to` reject relative offsets like `-5m`. Pass absolute ISO 8601 timestamps.
 - Ranges over 30 minutes are rejected unless the query filters on `_sourceCategory`,
   `_collector`, `_index`, or `_view`.
@@ -96,7 +110,7 @@ uv sync --group dev
 uv run pyinstaller --onefile --name sumologic \
   --collect-all mcp2cli \
   --exclude-module mcp.cli --exclude-module typer \
-  --hidden-import truststore \
+  --hidden-import truststore --copy-metadata sumologic-cli \
   --clean --noconfirm src/sumologic_cli/__main__.py
 ```
 
